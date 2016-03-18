@@ -1,0 +1,178 @@
+//---------------------------------------------------------
+//   layoutSystem
+//    return true if line continues
+//---------------------------------------------------------
+
+bool Score::layoutSystem(qreal& minWidth, qreal systemWidth, bool isFirstSystem, bool longName)
+      {
+      if (undoRedo())   // no change possible in this state
+            return layoutSystem1(minWidth, isFirstSystem, longName);
+      System* system = getNextSystem(isFirstSystem, false);
+
+      qreal xo = 0;
+      if (curMeasure->type() == Element::Type::HBOX)
+            xo = point(static_cast<Box*>(curMeasure)->boxWidth());
+
+      system->setInstrumentNames(longName);
+      system->layoutSystem(xo);
+
+      qreal minMeasureWidth = point(styleS(StyleIdx::minMeasureWidth));
+      minWidth              = system->leftMargin();
+      bool continueFlag     = false;
+      bool isFirstMeasure   = true;
+      Measure* firstMeasure = 0;
+      Measure* lastMeasure  = 0;
+
+      qreal measureSpacing = styleD(StyleIdx::measureSpacing);
+
+      for (; curMeasure;) {
+            MeasureBase* nextMeasure;
+            if (curMeasure->type() == Element::Type::MEASURE && !_showVBox)
+                  nextMeasure = curMeasure->nextMeasureMM();
+            else
+                  nextMeasure = curMeasure->nextMM();
+
+            Q_ASSERT(nextMeasure != curMeasure);
+
+            System* oldSystem = curMeasure->system();
+            curMeasure->setSystem(system);
+
+            bool hasCourtesy;
+            qreal cautionaryW = 0.0;
+            qreal ww          = 0.0;
+
+            if (curMeasure->type() == Element::Type::HBOX) {
+                  ww = point(static_cast<Box*>(curMeasure)->boxWidth());
+                  if (!isFirstMeasure) {
+                        // try to put another system on current row
+                        // if not a line break
+                        switch(_layoutMode) {
+                              case LayoutMode::FLOAT:
+                                    break;
+                              case LayoutMode::LINE:
+                              case LayoutMode::PAGE:
+                              case LayoutMode::SYSTEM:
+                                    continueFlag = !(curMeasure->lineBreak()
+                                                     || curMeasure->sectionBreak()
+                                                     || curMeasure->pageBreak());
+                                    break;
+                              }
+                        }
+                  }
+            else if (curMeasure->type() == Element::Type::MEASURE) {
+                  Measure* m = static_cast<Measure*>(curMeasure);
+                  m->createEndBarLines();       // TODO: type not set right here
+                  if (isFirstMeasure) {
+                        firstMeasure = m;
+                        addSystemHeader(m, isFirstSystem);
+                        ww = m->minWidth2();
+                        }
+                  else
+                        ww = m->minWidth1();
+
+                  Segment* s = m->last();
+                  if ((s->segmentType() == Segment::Type::EndBarLine) && s->element(0)) {
+                        BarLine*    bl = static_cast<BarLine*>(s->element(0));
+                        BarLineType ot = bl->barLineType();
+                        BarLineType nt = m->endBarLineType();
+
+                        if (m->repeatFlags() & Repeat::END)
+                              nt = BarLineType::END_REPEAT;
+                        else {
+                              Measure* nm = m->nextMeasureMM();
+                              if (nm && (nm->repeatFlags() & Repeat::START))
+                                    nt = BarLineType::START_REPEAT;
+                              }
+                        if (ot != nt) {
+                              qreal mag = bl->magS();
+                              ww += BarLine::layoutWidth(this, nt, mag)
+                                    - BarLine::layoutWidth(this, ot, mag);
+                              }
+                        }
+                  qreal stretch = m->userStretch() * measureSpacing;
+                  if (stretch < 1.0)
+                        stretch = 1.0;
+                  ww            *= stretch;
+                  cautionaryW   = cautionaryWidth(m, hasCourtesy) * stretch;
+
+                  // if measure does not already have courtesy elements,
+                  // add in the amount of space that courtesy elements would take if needed
+                  // (if measure *does* already have courtesy elements, these are included in width already)
+                  if (!hasCourtesy)
+                        ww += cautionaryW;
+
+                  if (ww < minMeasureWidth)
+                        ww = minMeasureWidth;
+                  isFirstMeasure = false;
+                  }
+
+            // collect at least one measure
+            bool empty = system->measures().isEmpty();
+            if (!empty && (minWidth + ww > systemWidth)) {
+                  curMeasure->setSystem(oldSystem);
+                  continueFlag = false;
+                  break;
+                  }
+
+            if (curMeasure->type() == Element::Type::MEASURE)
+                  lastMeasure = static_cast<Measure*>(curMeasure);
+
+            system->measures().append(curMeasure);
+
+            Element::Type ct = curMeasure->type();
+            Element::Type nt;
+            if (_showVBox)
+                  nt = curMeasure->nextMM() ? curMeasure->nextMM()->type() : Element::Type::INVALID;
+            else
+                  nt = curMeasure->nextMeasureMM() ? curMeasure->nextMeasureMM()->type() : Element::Type::INVALID;
+
+            bool pbreak;
+            switch (_layoutMode) {
+                  case LayoutMode::PAGE:
+                  case LayoutMode::SYSTEM:
+                        pbreak = curMeasure->pageBreak() || curMeasure->lineBreak() || curMeasure->sectionBreak();
+                        break;
+                  case LayoutMode::FLOAT:
+                  case LayoutMode::LINE:
+                        pbreak = false;
+                        break;
+                  }
+            if (continueFlag
+               || pbreak
+               || (nt == Element::Type::VBOX || nt == Element::Type::TBOX || nt == Element::Type::FBOX)
+               || (ct == Element::Type::VBOX || ct == Element::Type::TBOX || ct == Element::Type::FBOX)
+               ) {
+                  if (_layoutMode != LayoutMode::SYSTEM)
+                        system->setPageBreak(curMeasure->pageBreak());
+                  minWidth += ww;
+                  curMeasure = nextMeasure;
+                  break;
+                  }
+            curMeasure = nextMeasure;
+            if (minWidth + minMeasureWidth > systemWidth)   // small optimization
+                  break;      // next measure will not fit
+
+            minWidth += ww;
+            // whether the measure actually has courtesy elements or whether we added space for hypothetical ones,
+            // we should remove the width of courtesy elements for this measure from the accumulated total
+            // since at this point we are assuming we may be able to fit another measure
+            minWidth -= cautionaryW;
+            }
+
+      //
+      // remember line breaks in list of measures
+      //
+      int n = system->measures().size() - 1;
+      if (n >= 0) {
+            for (int i = 0; i < n; ++i)
+                  undoChangeProperty(system->measure(i), P_ID::BREAK_HINT, false);
+            undoChangeProperty(system->measures().last(), P_ID::BREAK_HINT, true);
+            }
+
+      if (firstMeasure && lastMeasure && firstMeasure != lastMeasure)
+            removeGeneratedElements(firstMeasure, lastMeasure);
+
+      hideEmptyStaves(system, isFirstSystem);
+
+      return continueFlag && curMeasure;
+      }
